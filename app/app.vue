@@ -40,6 +40,7 @@ const form = reactive({
   transparent: false
 })
 const format = ref<(typeof formats)[number]['value']>('png')
+const flat = ref(false)
 
 // number fields are empty while the user clears them
 const size = () => form.size || 300
@@ -79,11 +80,51 @@ onMounted(async () => {
 })
 watch(form, () => qr?.update(previewOptions()))
 
-function download() {
+// Affinity and some other design apps ignore clip-path and draw each clipped rect in full,
+// so replace every clipped rect with its clip shapes, filled directly
+function flattenSvg(svg: string) {
+  const doc = new DOMParser().parseFromString(svg, 'image/svg+xml')
+  const root = doc.documentElement
+  for (const el of [...root.children]) {
+    const id = el.getAttribute('clip-path')?.match(/#([^')]+)/)?.[1]
+    const clip = id && doc.getElementById(id)
+    if (!clip) continue
+    clip.remove()
+    const fill = el.getAttribute('fill')
+    // some apps draw fill="transparent" as black; leaving the shape out is the same picture
+    if (fill === 'transparent') {
+      el.remove()
+      continue
+    }
+    const g = doc.createElementNS(root.namespaceURI, 'g')
+    g.setAttribute('fill', fill!)
+    // touching shapes show hairline seams when anti-aliased; a thin same-color outline closes them
+    g.setAttribute('stroke', fill!)
+    g.setAttribute('stroke-width', String(Number(root.getAttribute('width')) / 1200))
+    for (const shape of [...clip.children]) {
+      const rule = shape.getAttribute('clip-rule')
+      if (rule) shape.setAttribute('fill-rule', rule)
+      shape.removeAttribute('clip-rule')
+      g.append(shape)
+    }
+    el.replaceWith(g)
+  }
+  return new XMLSerializer().serializeToString(doc)
+}
+
+async function download() {
   const opts = options()
   // JPG has no alpha channel; transparent pixels would turn black, so use white
   if (format.value === 'jpeg' && form.transparent) opts.backgroundOptions = { color: '#FFFFFF' }
-  new QRCode(opts).download({ name: 'qrcode', extension: format.value })
+  const code = new QRCode(opts)
+  if (format.value !== 'svg' || !flat.value) return code.download({ name: 'qrcode', extension: format.value })
+
+  const raw = await code.getRawData('svg') as Blob
+  const a = document.createElement('a')
+  a.href = URL.createObjectURL(new Blob([flattenSvg(await raw.text())], { type: 'image/svg+xml' }))
+  a.download = 'qrcode.svg'
+  a.click()
+  URL.revokeObjectURL(a.href)
 }
 </script>
 
@@ -240,6 +281,12 @@ function download() {
               @click="download"
             />
           </UFieldGroup>
+          <USwitch
+            v-if="format === 'svg'"
+            v-model="flat"
+            label="Flat SVG"
+            description="For Affinity and other design apps that show the code as a blank square"
+          />
         </UCard>
       </UContainer>
     </UMain>
